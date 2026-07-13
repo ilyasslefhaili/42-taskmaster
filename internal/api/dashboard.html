@@ -1,0 +1,172 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>taskmaster</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --border: #262b36;
+    --text: #e6e9ef; --muted: #8b93a7; --accent: #5b8def;
+    --green: #3fb950; --red: #f85149; --amber: #d29922; --blue: #58a6ff; --gray: #6e7681;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 16px;
+    padding: 16px 24px; border-bottom: 1px solid var(--border); background: var(--panel);
+    position: sticky; top: 0;
+  }
+  header h1 { font-size: 18px; margin: 0; font-weight: 600; letter-spacing: .3px; }
+  header .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--gray); }
+  header .dot.ok { background: var(--green); }
+  header .dot.err { background: var(--red); }
+  header .spacer { flex: 1; }
+  .meta { color: var(--muted); font-size: 13px; }
+  main { padding: 24px; max-width: 1000px; margin: 0 auto; }
+  table { width: 100%; border-collapse: collapse; }
+  th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; text-transform: uppercase; letter-spacing: .5px; }
+  td.name { font-weight: 600; }
+  td.mono { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .badge {
+    display: inline-block; padding: 2px 9px; border-radius: 999px;
+    font-size: 12px; font-weight: 600; letter-spacing: .3px;
+    background: rgba(110,118,129,.18); color: var(--gray);
+  }
+  .s-RUNNING  { background: rgba(63,185,80,.16);  color: var(--green); }
+  .s-STARTING { background: rgba(88,166,255,.16); color: var(--blue); }
+  .s-BACKOFF, .s-STOPPING { background: rgba(210,153,34,.16); color: var(--amber); }
+  .s-FATAL    { background: rgba(248,81,73,.16);  color: var(--red); }
+  .actions { display: flex; gap: 6px; }
+  button {
+    font: inherit; font-size: 13px; padding: 5px 12px; border-radius: 6px;
+    border: 1px solid var(--border); background: #1e232c; color: var(--text);
+    cursor: pointer; transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #262c37; border-color: #38414f; }
+  button:active { transform: translateY(1px); }
+  button.primary { border-color: var(--accent); color: var(--blue); }
+  .toolbar { display: flex; gap: 8px; margin-bottom: 16px; align-items: center; }
+  #toast {
+    position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 16px; opacity: 0; transition: opacity .2s; pointer-events: none;
+  }
+  #toast.show { opacity: 1; }
+  #toast.err { border-color: var(--red); color: var(--red); }
+  .empty { color: var(--muted); padding: 24px 12px; }
+</style>
+</head>
+<body>
+  <header>
+    <span class="dot" id="conn"></span>
+    <h1>taskmaster</h1>
+    <span class="spacer"></span>
+    <span class="meta" id="updated">connecting…</span>
+  </header>
+  <main>
+    <div class="toolbar">
+      <button class="primary" onclick="reloadConfig()">Reload config</button>
+      <span class="meta" id="count"></span>
+    </div>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>State</th><th>PID</th><th>Uptime</th><th>Retries</th><th>Last exit</th><th>Actions</th></tr>
+      </thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty" id="empty" hidden>No programs.</div>
+  </main>
+  <div id="toast"></div>
+
+<script>
+const rowsEl = document.getElementById('rows');
+const connEl = document.getElementById('conn');
+const updatedEl = document.getElementById('updated');
+const countEl = document.getElementById('count');
+const emptyEl = document.getElementById('empty');
+const toastEl = document.getElementById('toast');
+let toastTimer = null;
+
+function fmtUptime(s) {
+  if (!s || s < 0) return '—';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  if (h) return `${h}h${m}m`;
+  if (m) return `${m}m${sec}s`;
+  return `${sec}s`;
+}
+
+function toast(msg, isErr) {
+  toastEl.textContent = msg;
+  toastEl.className = 'show' + (isErr ? ' err' : '');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => (toastEl.className = ''), 2500);
+}
+
+function render(items) {
+  emptyEl.hidden = items.length > 0;
+  countEl.textContent = items.length ? `${items.length} process(es)` : '';
+  rowsEl.innerHTML = items.map(p => `
+    <tr>
+      <td class="name">${p.name}</td>
+      <td><span class="badge s-${p.state}">${p.state}</span></td>
+      <td class="mono">${p.pid || '—'}</td>
+      <td class="mono">${fmtUptime(p.uptime_seconds)}</td>
+      <td class="mono">${p.retries}</td>
+      <td class="mono">${p.last_exit >= 0 ? p.last_exit : '—'}</td>
+      <td>
+        <div class="actions">
+          <button onclick="act('${p.name}','start')">Start</button>
+          <button onclick="act('${p.name}','stop')">Stop</button>
+          <button onclick="act('${p.name}','restart')">Restart</button>
+        </div>
+      </td>
+    </tr>`).join('');
+}
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+    connEl.className = 'dot ok';
+    updatedEl.textContent = 'updated ' + new Date().toLocaleTimeString();
+  } catch (e) {
+    connEl.className = 'dot err';
+    updatedEl.textContent = 'disconnected';
+  }
+}
+
+async function act(name, action) {
+  try {
+    const r = await fetch(`/api/programs/${encodeURIComponent(name)}/${action}`, { method: 'POST' });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || r.status);
+    toast(`${action} ${name}`);
+    refresh();
+  } catch (e) {
+    toast(`${action} ${name} failed: ${e.message}`, true);
+  }
+}
+
+async function reloadConfig() {
+  try {
+    const r = await fetch('/api/reload', { method: 'POST' });
+    const body = await r.json();
+    if (!r.ok) throw new Error(body.error || r.status);
+    toast('configuration reloaded');
+    refresh();
+  } catch (e) {
+    toast('reload failed: ' + e.message, true);
+  }
+}
+
+refresh();
+setInterval(refresh, 1500);
+</script>
+</body>
+</html>

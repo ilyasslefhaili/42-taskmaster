@@ -26,10 +26,17 @@ const (
 // specify a logfile.
 const DefaultLogFile = "taskmaster.log"
 
+// DefaultHTTPAddr is the address the control HTTP server (and web dashboard)
+// listens on when the config does not specify one.
+const DefaultHTTPAddr = "127.0.0.1:9001"
+
 // Config is the fully parsed and validated configuration.
 type Config struct {
 	// LogFile is the local file lifecycle events are logged to.
-	LogFile  string              `yaml:"logfile"`
+	LogFile string `yaml:"logfile"`
+	// HTTPAddr is the listen address for the control API and web dashboard.
+	// Set it to "off" to disable the HTTP server.
+	HTTPAddr string              `yaml:"httpaddr"`
 	Programs map[string]*Program `yaml:"programs"`
 }
 
@@ -166,6 +173,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.LogFile == "" {
 		cfg.LogFile = DefaultLogFile
+	}
+	if cfg.HTTPAddr == "" {
+		cfg.HTTPAddr = DefaultHTTPAddr
 	}
 	for name, p := range cfg.Programs {
 		p.Name = name

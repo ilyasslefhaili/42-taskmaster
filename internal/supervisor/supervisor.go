@@ -300,56 +300,83 @@ func (s *Supervisor) stopProc(p *process) {
 
 // --- control handlers ---
 
-func (s *Supervisor) handleStart(name string) error {
-	pr, ok := s.programs[name]
-	if !ok {
-		return fmt.Errorf("unknown program %q", name)
+// resolve maps a control target to the processes it names. A target may be a
+// program name (all its instances) or a single instance name like "prog:0".
+func (s *Supervisor) resolve(target string) ([]*process, error) {
+	if pr, ok := s.programs[target]; ok {
+		return pr.procs, nil
 	}
-	for _, p := range pr.procs {
-		switch p.state {
-		case Stopped, Exited, Fatal:
-			p.retries = 0
-			s.launch(p)
-		case Backoff:
-			s.cancelBackoff(p)
-			p.retries = 0
-			s.launch(p)
+	for _, name := range s.order {
+		for _, p := range s.programs[name].procs {
+			if p.name == target {
+				return []*process{p}, nil
+			}
 		}
+	}
+	return nil, fmt.Errorf("unknown program or process %q", target)
+}
+
+func (s *Supervisor) handleStart(target string) error {
+	procs, err := s.resolve(target)
+	if err != nil {
+		return err
+	}
+	for _, p := range procs {
+		s.startProc(p)
 	}
 	return nil
 }
 
-func (s *Supervisor) handleStop(name string) error {
-	pr, ok := s.programs[name]
-	if !ok {
-		return fmt.Errorf("unknown program %q", name)
+func (s *Supervisor) handleStop(target string) error {
+	procs, err := s.resolve(target)
+	if err != nil {
+		return err
 	}
-	for _, p := range pr.procs {
+	for _, p := range procs {
 		s.stopProc(p)
 	}
 	return nil
 }
 
-func (s *Supervisor) handleRestart(name string) error {
-	pr, ok := s.programs[name]
-	if !ok {
-		return fmt.Errorf("unknown program %q", name)
+func (s *Supervisor) handleRestart(target string) error {
+	procs, err := s.resolve(target)
+	if err != nil {
+		return err
 	}
-	for _, p := range pr.procs {
-		switch p.state {
-		case Running, Starting:
-			p.restartAfterStop = true
-			s.beginStop(p)
-		case Backoff:
-			s.cancelBackoff(p)
-			p.retries = 0
-			s.launch(p)
-		case Stopped, Exited, Fatal:
-			p.retries = 0
-			s.launch(p)
-		}
+	for _, p := range procs {
+		s.restartProc(p)
 	}
 	return nil
+}
+
+// startProc starts a single stopped/exited/fatal/backoff process.
+func (s *Supervisor) startProc(p *process) {
+	switch p.state {
+	case Stopped, Exited, Fatal:
+		p.retries = 0
+		s.launch(p)
+	case Backoff:
+		s.cancelBackoff(p)
+		p.retries = 0
+		s.launch(p)
+	}
+}
+
+// restartProc restarts a single process: stop-then-start if it is up, otherwise
+// start it.
+func (s *Supervisor) restartProc(p *process) {
+	switch p.state {
+	case Running, Starting:
+		p.restartAfterStop = true
+		s.beginStop(p)
+	case Backoff:
+		s.cancelBackoff(p)
+		p.retries = 0
+		s.launch(p)
+	case Stopped, Exited, Fatal:
+		p.retries = 0
+		s.launch(p)
+	}
 }
 
 func (s *Supervisor) handleShutdown(reply chan struct{}) {
@@ -420,9 +447,18 @@ func (s *Supervisor) addProgram(name string, pc *config.Program) {
 	}
 }
 
+// names returns valid control targets: every program name, plus each instance
+// name for programs with more than one instance.
 func (s *Supervisor) names() []string {
-	names := make([]string, len(s.order))
-	copy(names, s.order)
+	var names []string
+	for _, name := range s.order {
+		names = append(names, name)
+		if pr := s.programs[name]; len(pr.procs) > 1 {
+			for _, p := range pr.procs {
+				names = append(names, p.name)
+			}
+		}
+	}
 	return names
 }
 
@@ -569,24 +605,25 @@ func (s *Supervisor) logf(format string, a ...any) {
 
 // --- public control API (safe to call from any goroutine) ---
 
-// StartProgram starts every stopped instance of the named program.
-func (s *Supervisor) StartProgram(name string) error {
+// StartProgram starts a target, which may be a program name (all its instances)
+// or a single instance name like "prog:0".
+func (s *Supervisor) StartProgram(target string) error {
 	reply := make(chan error, 1)
-	s.events <- evStart{name: name, reply: reply}
+	s.events <- evStart{name: target, reply: reply}
 	return <-reply
 }
 
-// StopProgram gracefully stops every running instance of the named program.
-func (s *Supervisor) StopProgram(name string) error {
+// StopProgram gracefully stops a target (program name or single instance).
+func (s *Supervisor) StopProgram(target string) error {
 	reply := make(chan error, 1)
-	s.events <- evStop{name: name, reply: reply}
+	s.events <- evStop{name: target, reply: reply}
 	return <-reply
 }
 
-// RestartProgram stops then starts every instance of the named program.
-func (s *Supervisor) RestartProgram(name string) error {
+// RestartProgram restarts a target (program name or single instance).
+func (s *Supervisor) RestartProgram(target string) error {
 	reply := make(chan error, 1)
-	s.events <- evRestart{name: name, reply: reply}
+	s.events <- evRestart{name: target, reply: reply}
 	return <-reply
 }
 

@@ -47,7 +47,17 @@ gofmt -l .                     # list unformatted files; should be empty
 - All lifecycle events (start/stop/restart/unexpected death/reload) are logged
   to a local log file.
 
+## HTTP control API & dashboard
+
+The daemon runs an HTTP server (config key `httpaddr`, default `127.0.0.1:9001`,
+`off` to disable) exposing a JSON control API and an embedded web dashboard at
+`/`. Endpoints: `GET /api/status`, `POST /api/programs/{name}/{start,stop,
+restart}`, `POST /api/reload`. `taskmasterctl` is a CLI client for this API
+(`taskmasterctl [-addr host:port] <status|start|stop|restart|reload>`).
+
 ## Status
 
-Early scaffold. Supervisor engine, config loader, control shell, and logging are
-not yet implemented. See the project plan discussion for phasing.
+Mandatory part complete: config loader (`internal/config`), supervisor engine
+(`internal/supervisor`), file logging, readline control shell (`internal/shell`
++ `internal/parser/shellparser`), and SIGHUP reload. Bonus: client/server via an
+HTTP API + web dashboard (`internal/api`, `cmd/taskmasterctl`).
