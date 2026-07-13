@@ -1,11 +1,10 @@
 package main
 
-import (
-	// Import the full path to the directory containing the package code
-	"42-taskmaster/internal/parser/shellparser"
-)
+import "fmt"
 
+// taskmasterctl is the control client for the client/server bonus. The
+// mandatory part serves the control shell from taskmaster itself, so this is a
+// placeholder until the bonus is implemented.
 func main() {
-	// Call the exported function using the package name 'shellparser'
-	shellparser.ShellParser()
+	fmt.Println("taskmasterctl: client/server bonus not implemented yet")
 }

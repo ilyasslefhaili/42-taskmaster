@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"reflect"
 	"sort"
 	"sync"
 	"syscall"
@@ -64,6 +65,13 @@ type evRestart struct {
 type evStatus struct {
 	reply chan []ProcStatus
 }
+type evNames struct {
+	reply chan []string
+}
+type evReload struct {
+	cfg   *config.Config
+	reply chan struct{}
+}
 type evShutdown struct {
 	reply chan struct{}
 }
@@ -101,23 +109,27 @@ func New(cfg *config.Config, logger *log.Logger) *Supervisor {
 	sort.Strings(s.order)
 
 	for _, name := range s.order {
-		pc := cfg.Programs[name]
-		pr := &program{cfg: pc}
-		for i := 0; i < pc.NumProcs; i++ {
-			pn := name
-			if pc.NumProcs > 1 {
-				pn = fmt.Sprintf("%s:%d", name, i)
-			}
-			pr.procs = append(pr.procs, &process{
-				name:         pn,
-				prog:         pc,
-				state:        Stopped,
-				lastExitCode: -1,
-			})
-		}
-		s.programs[name] = pr
+		s.programs[name] = buildProgram(name, cfg.Programs[name])
 	}
 	return s
+}
+
+// buildProgram creates a program and its (initially STOPPED) process instances.
+func buildProgram(name string, pc *config.Program) *program {
+	pr := &program{cfg: pc}
+	for i := 0; i < pc.NumProcs; i++ {
+		pn := name
+		if pc.NumProcs > 1 {
+			pn = fmt.Sprintf("%s:%d", name, i)
+		}
+		pr.procs = append(pr.procs, &process{
+			name:         pn,
+			prog:         pc,
+			state:        Stopped,
+			lastExitCode: -1,
+		})
+	}
+	return pr
 }
 
 // Start launches the manager goroutine and autostarts programs.
@@ -155,6 +167,11 @@ func (s *Supervisor) dispatch(e any) {
 		ev.reply <- s.handleRestart(ev.name)
 	case evStatus:
 		ev.reply <- s.snapshot()
+	case evNames:
+		ev.reply <- s.names()
+	case evReload:
+		s.handleReload(ev.cfg)
+		ev.reply <- struct{}{}
 	case evShutdown:
 		s.handleShutdown(ev.reply)
 	case evExited:
@@ -345,6 +362,70 @@ func (s *Supervisor) handleShutdown(reply chan struct{}) {
 	}
 }
 
+// handleReload applies a new configuration to the running state. Programs whose
+// spec is unchanged are left completely untouched (their processes keep
+// running); removed programs are stopped and dropped; added or changed programs
+// are (re)created and autostarted per the new spec.
+func (s *Supervisor) handleReload(cfg *config.Config) {
+	s.logf("reload: applying new configuration")
+
+	// Removed programs: stop and drop.
+	for _, name := range s.order {
+		if _, ok := cfg.Programs[name]; !ok {
+			s.logf("reload: removing program %q", name)
+			for _, p := range s.programs[name].procs {
+				s.stopProc(p)
+			}
+			delete(s.programs, name)
+		}
+	}
+
+	// Added and changed programs.
+	var newOrder []string
+	for name := range cfg.Programs {
+		newOrder = append(newOrder, name)
+	}
+	sort.Strings(newOrder)
+
+	for _, name := range newOrder {
+		newPc := cfg.Programs[name]
+		old, exists := s.programs[name]
+		switch {
+		case !exists:
+			s.logf("reload: adding program %q", name)
+			s.addProgram(name, newPc)
+		case reflect.DeepEqual(*old.cfg, *newPc):
+			// Unchanged: do not disturb running processes.
+		default:
+			s.logf("reload: updating program %q", name)
+			for _, p := range old.procs {
+				s.stopProc(p) // detached below; will not restart
+			}
+			s.addProgram(name, newPc)
+		}
+	}
+
+	s.order = newOrder
+	s.logf("reload: complete (%d programs)", len(newOrder))
+}
+
+// addProgram installs a freshly built program and autostarts it if configured.
+func (s *Supervisor) addProgram(name string, pc *config.Program) {
+	pr := buildProgram(name, pc)
+	s.programs[name] = pr
+	if pc.AutoStart {
+		for _, p := range pr.procs {
+			s.launch(p)
+		}
+	}
+}
+
+func (s *Supervisor) names() []string {
+	names := make([]string, len(s.order))
+	copy(names, s.order)
+	return names
+}
+
 // --- event handlers ---
 
 func (s *Supervisor) handleExited(ev evExited) {
@@ -507,6 +588,21 @@ func (s *Supervisor) RestartProgram(name string) error {
 	reply := make(chan error, 1)
 	s.events <- evRestart{name: name, reply: reply}
 	return <-reply
+}
+
+// ProgramNames returns the configured program names in sorted order.
+func (s *Supervisor) ProgramNames() []string {
+	reply := make(chan []string, 1)
+	s.events <- evNames{reply: reply}
+	return <-reply
+}
+
+// Reload applies a new configuration to the running state without disturbing
+// programs whose spec is unchanged.
+func (s *Supervisor) Reload(cfg *config.Config) {
+	reply := make(chan struct{})
+	s.events <- evReload{cfg: cfg, reply: reply}
+	<-reply
 }
 
 // Status returns a snapshot of every process.
