@@ -22,8 +22,14 @@ const (
 	RestartUnexpected = "unexpected"
 )
 
+// DefaultLogFile is where lifecycle events are written when the config does not
+// specify a logfile.
+const DefaultLogFile = "taskmaster.log"
+
 // Config is the fully parsed and validated configuration.
 type Config struct {
+	// LogFile is the local file lifecycle events are logged to.
+	LogFile  string              `yaml:"logfile"`
 	Programs map[string]*Program `yaml:"programs"`
 }
 
@@ -157,6 +163,9 @@ func Load(path string) (*Config, error) {
 	}
 	if len(cfg.Programs) == 0 {
 		return nil, fmt.Errorf("config defines no programs")
+	}
+	if cfg.LogFile == "" {
+		cfg.LogFile = DefaultLogFile
 	}
 	for name, p := range cfg.Programs {
 		p.Name = name

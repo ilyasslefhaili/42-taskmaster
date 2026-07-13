@@ -1,11 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
+	"log"
 	"os"
-	"sort"
+	"os/signal"
+	"strings"
+	"syscall"
+	"text/tabwriter"
 
 	"42-taskmaster/internal/config"
+	"42-taskmaster/internal/supervisor"
 )
 
 func main() {
@@ -20,72 +26,106 @@ func main() {
 		os.Exit(1)
 	}
 
-	printSummary(cfg)
-	// TODO(phase 2): start the supervisor engine.
+	logFile, err := os.OpenFile(cfg.LogFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "taskmaster: cannot open log file %s: %v\n", cfg.LogFile, err)
+		os.Exit(1)
+	}
+	defer logFile.Close()
+	logger := log.New(logFile, "", log.LstdFlags)
+	logger.Printf("taskmaster: started, supervising config %s", os.Args[1])
+
+	fmt.Printf("taskmaster: logging events to %s (tail -f to follow)\n", cfg.LogFile)
+
+	sv := supervisor.New(cfg, logger)
+	sv.Start()
+
+	// Graceful shutdown on Ctrl-C / SIGTERM.
+	sigc := make(chan os.Signal, 1)
+	signal.Notify(sigc, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigc
+		fmt.Println("\ntaskmaster: shutting down...")
+		logger.Printf("taskmaster: shutting down (signal)")
+		sv.Shutdown()
+		os.Exit(0)
+	}()
+
+	commandLoop(sv)
+
+	// Reached on EOF (Ctrl-D).
+	fmt.Println("taskmaster: shutting down...")
+	logger.Printf("taskmaster: shutting down (eof)")
+	sv.Shutdown()
 }
 
-// printSummary prints the fully parsed and defaulted configuration so the exact
-// values the supervisor engine will consume can be eyeballed.
-func printSummary(cfg *config.Config) {
-	names := make([]string, 0, len(cfg.Programs))
-	for name := range cfg.Programs {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-
-	fmt.Printf("loaded %d program(s):\n\n", len(names))
-	for _, name := range names {
-		p := cfg.Programs[name]
-		sig, _ := p.Signal() // already validated during Load
-
-		fmt.Printf("[%s]\n", name)
-		fmt.Printf("  cmd          %q\n", p.Cmd)
-		fmt.Printf("  numprocs     %d\n", p.NumProcs)
-		fmt.Printf("  autostart    %t\n", p.AutoStart)
-		fmt.Printf("  autorestart  %s\n", p.AutoRestart)
-		fmt.Printf("  exitcodes    %v\n", []int(p.ExitCodes))
-		fmt.Printf("  startretries %d\n", p.StartRetries)
-		fmt.Printf("  starttime    %ds\n", p.StartTime)
-		fmt.Printf("  stopsignal   %s (signal %d)\n", p.StopSignal, int(sig))
-		fmt.Printf("  stoptime     %ds\n", p.StopTime)
-		fmt.Printf("  umask        %s\n", umaskString(int(p.Umask)))
-		fmt.Printf("  workingdir   %q\n", p.WorkingDir)
-		fmt.Printf("  stdout       %s\n", streamString(p.Stdout))
-		fmt.Printf("  stderr       %s\n", streamString(p.Stderr))
-		fmt.Printf("  env          %s\n", envString(p.Env))
-		fmt.Println()
-	}
-}
-
-func umaskString(m int) string {
-	if m < 0 {
-		return "inherit"
-	}
-	return fmt.Sprintf("%04o", m)
-}
-
-func streamString(path string) string {
-	if path == "" {
-		return "(discard)"
-	}
-	return fmt.Sprintf("%q", path)
-}
-
-func envString(env config.EnvMap) string {
-	if len(env) == 0 {
-		return "(none)"
-	}
-	keys := make([]string, 0, len(env))
-	for k := range env {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	out := ""
-	for i, k := range keys {
-		if i > 0 {
-			out += " "
+// commandLoop is a minimal control shell for phase 2. Phase 4 replaces it with
+// a proper readline shell driven by the shellparser package.
+func commandLoop(sv *supervisor.Supervisor) {
+	fmt.Println("taskmaster: type 'help' for commands")
+	scanner := bufio.NewScanner(os.Stdin)
+	fmt.Print("taskmaster> ")
+	for scanner.Scan() {
+		fields := strings.Fields(scanner.Text())
+		if len(fields) > 0 {
+			if quit := runCommand(sv, fields); quit {
+				return
+			}
 		}
-		out += fmt.Sprintf("%s=%s", k, env[k])
+		fmt.Print("taskmaster> ")
 	}
-	return out
+}
+
+// runCommand executes one parsed command, returning true when the shell should
+// exit.
+func runCommand(sv *supervisor.Supervisor, fields []string) (quit bool) {
+	cmd, args := fields[0], fields[1:]
+	switch cmd {
+	case "help":
+		fmt.Println("commands: status | start <name> | stop <name> | restart <name> | quit")
+	case "status":
+		printStatus(sv)
+	case "start", "stop", "restart":
+		if len(args) != 1 {
+			fmt.Printf("usage: %s <name>\n", cmd)
+			return false
+		}
+		var err error
+		switch cmd {
+		case "start":
+			err = sv.StartProgram(args[0])
+		case "stop":
+			err = sv.StopProgram(args[0])
+		case "restart":
+			err = sv.RestartProgram(args[0])
+		}
+		if err != nil {
+			fmt.Printf("error: %v\n", err)
+		}
+	case "quit", "exit":
+		return true
+	default:
+		fmt.Printf("unknown command %q (try 'help')\n", cmd)
+	}
+	return false
+}
+
+func printStatus(sv *supervisor.Supervisor) {
+	w := tabwriter.NewWriter(os.Stdout, 0, 4, 2, ' ', 0)
+	fmt.Fprintln(w, "NAME\tSTATE\tPID\tUPTIME\tRETRIES\tLAST-EXIT")
+	for _, st := range sv.Status() {
+		pid := "-"
+		uptime := "-"
+		if st.PID != 0 {
+			pid = fmt.Sprintf("%d", st.PID)
+			uptime = st.Uptime.String()
+		}
+		exit := "-"
+		if st.LastExit >= 0 {
+			exit = fmt.Sprintf("%d", st.LastExit)
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%d\t%s\n",
+			st.Name, st.State, pid, uptime, st.Retries, exit)
+	}
+	w.Flush()
 }

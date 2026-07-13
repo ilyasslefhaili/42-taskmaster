@@ -35,6 +35,17 @@ func ParseSignal(name string) (syscall.Signal, error) {
 	return sig, nil
 }
 
+// SignalName returns the canonical "SIG"-prefixed name for sig (e.g. SIGTERM),
+// falling back to the kernel's description for signals taskmaster doesn't name.
+func SignalName(sig syscall.Signal) string {
+	for name, s := range signalNames {
+		if s == sig {
+			return "SIG" + name
+		}
+	}
+	return sig.String()
+}
+
 // knownSignals returns a sorted, comma-separated list of accepted signal names,
 // used to make error messages actionable.
 func knownSignals() string {
